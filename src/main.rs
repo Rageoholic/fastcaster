@@ -1,6 +1,7 @@
 use std::{sync::mpsc::channel, thread};
 
 use softbuffer::GraphicsContext;
+use vek::{Lerp, Ray, Rgb, Vec3};
 use winit::{
     dpi::PhysicalSize,
     event::{Event, StartCause, WindowEvent},
@@ -18,41 +19,95 @@ struct Pixel {
     blue: u8,
 }
 
+#[derive(Clone, Copy)]
+struct Sphere {
+    origin: vek::Vec3<f32>,
+    radius: f32,
+}
+struct World<'a> {
+    spheres: &'a [Sphere],
+}
+
 impl Pixel {
+    /// Turn pixel into an RGB u32. R high, top padding
     fn to_u32(self) -> u32 {
         let r_channel = (self.red as u32) << 16;
         let g_channel = (self.green as u32) << 8;
         let b_channel = (self.blue as u32) << 0;
         r_channel | g_channel | b_channel
     }
+
+    /// Create a pixel from an RGB vec in the [0,1] range
+    fn from_vek_color(v: Rgb<f32>) -> Self {
+        Self {
+            red: (v.r * 255.99) as u8,
+            green: (v.g * 255.99) as u8,
+            blue: (v.b * 255.99) as u8,
+        }
+    }
+}
+
+fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> bool {
+    let oc = ray.origin - sphere.origin;
+    let a = ray.direction.dot(ray.direction);
+    let b = 2.0 * oc.dot(ray.direction);
+    let c = oc.dot(oc) - sphere.radius * sphere.radius;
+    0.0 < b * b - 4.0 * a * c
+}
+
+fn ray_cast(ray: Ray<f32>, world: &World) -> Rgb<f32> {
+    let t = 0.5 * (ray.direction.y + 1.0);
+    let background_color = Lerp::lerp(Rgb::broadcast(1.0), Rgb::new(0.5, 0.7, 1.0), 1.0 - t);
+    let mut color = background_color;
+    for sphere in world.spheres {
+        if hit_sphere(ray, *sphere) {
+            color = Rgb::new(1.0, 0.0, 0.0);
+        }
+    }
+    color
 }
 
 #[derive(Debug)]
-struct ThreadRedrew(Vec<u32>);
+struct ThreadRedrawCompleteEvent(Vec<u32>);
 
-fn draw(draw_size: PhysicalSize<u32>) -> Vec<u32> {
+fn draw(draw_size: PhysicalSize<u32>, world: &World) -> Vec<u32> {
     let (width, height) = (draw_size.width as usize, draw_size.height as usize);
+    let aspect_ratio = width as f32 / height as f32;
+    let viewport_height = 2.0;
+    let viewport_width = aspect_ratio * viewport_height;
+    let focal_length = 1.0;
+
+    let origin = Vec3::new(0.0, 0.0, 0.0);
+    let horizontal = Vec3::new(viewport_width, 0.0, 0.0);
+    let vertical = Vec3::new(0.0, viewport_height, 0.0);
+
+    let lower_left_corner =
+        origin - horizontal / 2.0 - vertical / 2.0 - Vec3::new(0.0, 0.0, focal_length);
+
     let mut buffer = Vec::with_capacity(width * height);
-    for pixel_number in 0..(width * height) {
-        let (x, y) = (pixel_number % width, pixel_number / width);
-        let r = 0;
-        let g = x % 256;
-        let b = y % 256;
-        buffer.push(
-            Pixel {
-                red: r,
-                green: g as u8,
-                blue: b as u8,
+    for y in 0..height {
+        for x in 0..width {
+            let u = x as f32 / (width as f32 - 1.0);
+            let v = y as f32 / (height as f32 - 1.0);
+
+            let normalized_direction =
+                (lower_left_corner + u * horizontal + v * vertical - origin).normalized();
+            if !normalized_direction.is_normalized() {
+                eprintln!("non normal vector");
             }
-            .to_u32(),
-        );
+            let ray = Ray::new(origin, normalized_direction);
+
+            let pixel_color = ray_cast(ray, world);
+
+            buffer.push(Pixel::from_vek_color(pixel_color).to_u32())
+        }
     }
 
     buffer
 }
 
 fn main() {
-    let event_loop = EventLoopBuilder::<ThreadRedrew>::with_user_event().build();
+    let event_loop = EventLoopBuilder::<ThreadRedrawCompleteEvent>::with_user_event().build();
     let window = WindowBuilder::new()
         .with_inner_size(PhysicalSize::new(WIDTH as f32, HEIGHT as f32))
         .build(&event_loop)
@@ -70,8 +125,14 @@ fn main() {
 
     let _thread = thread::spawn(move || loop {
         let draw_size = receiver.recv().unwrap();
+        let world = World {
+            spheres: &[Sphere {
+                origin: Vec3::new(0.0, 0.0, -1.0),
+                radius: 0.5,
+            }],
+        };
         event_loop_proxy
-            .send_event(ThreadRedrew(draw(draw_size)))
+            .send_event(ThreadRedrawCompleteEvent(draw(draw_size, &world)))
             .unwrap();
     });
 
@@ -89,7 +150,7 @@ fn main() {
             }
             _ => {}
         },
-        Event::UserEvent(ThreadRedrew(new_buf)) => {
+        Event::UserEvent(ThreadRedrawCompleteEvent(new_buf)) => {
             if buffer.len() == new_buf.len() {
                 buffer = new_buf;
             }
