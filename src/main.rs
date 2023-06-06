@@ -23,6 +23,7 @@ struct Pixel {
 struct Sphere {
     origin: vek::Vec3<f32>,
     radius: f32,
+    color: Rgb<f32>,
 }
 struct World<'a> {
     spheres: &'a [Sphere],
@@ -47,21 +48,55 @@ impl Pixel {
     }
 }
 
-fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> bool {
+fn visualize_normal(normal: Vec3<f32>) -> Rgb<f32> {
+    (normal / 2.0 + 0.5).into()
+}
+
+struct HitRecord {
+    intersection_point: Vec3<f32>,
+    surface_normal: Vec3<f32>,
+    distance: f32,
+}
+
+fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> Option<HitRecord> {
     let oc = ray.origin - sphere.origin;
     let a = ray.direction.dot(ray.direction);
     let b = 2.0 * oc.dot(ray.direction);
     let c = oc.dot(oc) - sphere.radius * sphere.radius;
-    0.0 < b * b - 4.0 * a * c
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant > 0.0 {
+        let neg_distance = (-b - discriminant.sqrt()) / (2.0 * a);
+        let pos_distance = (-b + discriminant.sqrt()) / (2.0 * a);
+        let distance = if neg_distance > 0.0 {
+            neg_distance
+        } else if pos_distance > 0.0 {
+            pos_distance
+        } else {
+            return None;
+        };
+        let intersection_point = ray.origin + ray.direction * distance;
+        let surface_normal = (intersection_point - sphere.origin).normalized();
+        Some(HitRecord {
+            intersection_point,
+            surface_normal,
+            distance,
+        })
+    } else {
+        None
+    }
 }
 
 fn ray_cast(ray: Ray<f32>, world: &World) -> Rgb<f32> {
     let t = 0.5 * (ray.direction.y + 1.0);
     let background_color = Lerp::lerp(Rgb::broadcast(1.0), Rgb::new(0.5, 0.7, 1.0), 1.0 - t);
     let mut color = background_color;
+    let mut min_distance = f32::INFINITY;
     for sphere in world.spheres {
-        if hit_sphere(ray, *sphere) {
-            color = Rgb::new(1.0, 0.0, 0.0);
+        if let Some(hit_record) = hit_sphere(ray, *sphere) {
+            if hit_record.distance < min_distance {
+                min_distance = hit_record.distance;
+                color = visualize_normal(hit_record.surface_normal);
+            }
         }
     }
     color
@@ -77,21 +112,22 @@ fn draw(draw_size: PhysicalSize<u32>, world: &World) -> Vec<u32> {
     let viewport_width = aspect_ratio * viewport_height;
     let focal_length = 1.0;
 
-    let origin = Vec3::new(0.0, 0.0, 0.0);
+    let origin = Vec3::broadcast(0.0);
     let horizontal = Vec3::new(viewport_width, 0.0, 0.0);
     let vertical = Vec3::new(0.0, viewport_height, 0.0);
 
-    let lower_left_corner =
+    let upper_left_corner =
         origin - horizontal / 2.0 - vertical / 2.0 - Vec3::new(0.0, 0.0, focal_length);
+    println!("{:?}", upper_left_corner);
 
     let mut buffer = Vec::with_capacity(width * height);
-    for y in 0..height {
+    for y in (0..height).rev() {
         for x in 0..width {
             let u = x as f32 / (width as f32 - 1.0);
             let v = y as f32 / (height as f32 - 1.0);
 
             let normalized_direction =
-                (lower_left_corner + u * horizontal + v * vertical - origin).normalized();
+                (upper_left_corner + u * horizontal + v * vertical - origin).normalized();
             if !normalized_direction.is_normalized() {
                 eprintln!("non normal vector");
             }
@@ -99,7 +135,9 @@ fn draw(draw_size: PhysicalSize<u32>, world: &World) -> Vec<u32> {
 
             let pixel_color = ray_cast(ray, world);
 
-            buffer.push(Pixel::from_vek_color(pixel_color).to_u32())
+            let pixel_color = Pixel::from_vek_color(pixel_color);
+
+            buffer.push(pixel_color.to_u32())
         }
     }
 
@@ -126,10 +164,26 @@ fn main() {
     let _thread = thread::spawn(move || loop {
         let draw_size = receiver.recv().unwrap();
         let world = World {
-            spheres: &[Sphere {
-                origin: Vec3::new(0.0, 0.0, -1.0),
-                radius: 0.5,
-            }],
+            spheres: &[
+                Sphere {
+                    origin: Vec3::new(0.0, 0.0, -1.0),
+                    radius: 0.5,
+                    color: Rgb {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                    },
+                },
+                Sphere {
+                    origin: Vec3::new(0.0, -100.5, -1.0),
+                    radius: 100.0,
+                    color: Rgb {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                    },
+                },
+            ],
         };
         event_loop_proxy
             .send_event(ThreadRedrawCompleteEvent(draw(draw_size, &world)))
