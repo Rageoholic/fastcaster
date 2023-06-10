@@ -1,5 +1,6 @@
 use std::{sync::mpsc::channel, thread};
 
+use rand::Rng;
 use softbuffer::GraphicsContext;
 use vek::{Lerp, Ray, Rgb, Vec3};
 use winit::{
@@ -86,7 +87,7 @@ fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> Option<HitRecord> {
     }
 }
 
-fn ray_cast(ray: Ray<f32>, world: &World) -> Rgb<f32> {
+fn ray_cast(ray: Ray<f32>, world: &World, rng: &mut impl rand::Rng) -> Rgb<f32> {
     let t = 0.5 * (ray.direction.y + 1.0);
     let background_color = Lerp::lerp(Rgb::broadcast(1.0), Rgb::new(0.5, 0.7, 1.0), 1.0 - t);
     let mut color = background_color;
@@ -111,6 +112,7 @@ fn draw(draw_size: PhysicalSize<u32>, world: &World) -> Vec<u32> {
     let viewport_height = 2.0;
     let viewport_width = aspect_ratio * viewport_height;
     let focal_length = 1.0;
+    let mut rng = rand::thread_rng();
 
     let origin = Vec3::broadcast(0.0);
     let horizontal = Vec3::new(viewport_width, 0.0, 0.0);
@@ -118,24 +120,26 @@ fn draw(draw_size: PhysicalSize<u32>, world: &World) -> Vec<u32> {
 
     let upper_left_corner =
         origin - horizontal / 2.0 - vertical / 2.0 - Vec3::new(0.0, 0.0, focal_length);
-    println!("{:?}", upper_left_corner);
+    let sample_count = 4;
 
     let mut buffer = Vec::with_capacity(width * height);
     for y in (0..height).rev() {
         for x in 0..width {
-            let u = x as f32 / (width as f32 - 1.0);
-            let v = y as f32 / (height as f32 - 1.0);
+            let mut pixel_color = Rgb::broadcast(0.0);
+            for _ in 0..sample_count {
+                let v = (y as f32 + rng.gen::<f32>()) / (height as f32 - 1.0);
+                let u = (x as f32 + rng.gen::<f32>()) / (width as f32 - 1.0);
 
-            let normalized_direction =
-                (upper_left_corner + u * horizontal + v * vertical - origin).normalized();
-            if !normalized_direction.is_normalized() {
-                eprintln!("non normal vector");
+                let normalized_direction =
+                    (upper_left_corner + u * horizontal + v * vertical - origin).normalized();
+                if !normalized_direction.is_normalized() {
+                    eprintln!("non normal vector");
+                }
+                let ray = Ray::new(origin, normalized_direction);
+
+                pixel_color += ray_cast(ray, world, &mut rng);
             }
-            let ray = Ray::new(origin, normalized_direction);
-
-            let pixel_color = ray_cast(ray, world);
-
-            let pixel_color = Pixel::from_vek_color(pixel_color);
+            let pixel_color = Pixel::from_vek_color(pixel_color / sample_count as f32);
 
             buffer.push(pixel_color.to_u32())
         }
