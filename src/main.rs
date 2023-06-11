@@ -87,12 +87,13 @@ fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> Option<HitRecord> {
         None
     }
 }
+const MAX_DEPTH: usize = 50;
 
 fn ray_cast(mut ray: Ray<f32>, world: &World, rng: &mut impl rand::Rng) -> Rgb<f32> {
-    let t = 0.5 * (ray.direction.y + 1.0);
+    let t = 1.0 - 0.5 * (ray.direction.y + 1.0);
     let background_color = Lerp::lerp(Rgb::broadcast(1.0), Rgb::new(0.5, 0.7, 1.0), 1.0 - t);
     let mut color = Rgb::broadcast(1.0);
-    for _ in 0..4 {
+    for _ in 0..MAX_DEPTH {
         let mut min_hit_record: Option<(HitRecord, Rgb<f32>)> = None;
         for sphere in world.spheres {
             if let Some(hit_record) = hit_sphere(ray, *sphere) {
@@ -162,9 +163,10 @@ fn draw(draw_size: PhysicalSize<u32>, world: &World) -> Vec<u32> {
 
                 pixel_color += ray_cast(ray, world, &mut rng);
             }
-            let pixel_color = Pixel::from_vek_color(pixel_color / sample_count as f32);
+            let corrected_pixel_color = pixel_color.map(|f| f.sqrt());
+            let pixel_bits = Pixel::from_vek_color(pixel_color / sample_count as f32);
 
-            buffer.push(pixel_color.to_u32())
+            buffer.push(pixel_bits.to_u32())
         }
     }
 
@@ -196,18 +198,18 @@ fn main() {
                     origin: Vec3::new(0.0, 0.0, -1.0),
                     radius: 0.5,
                     color: Rgb {
-                        r: 1.0,
-                        g: 0.0,
-                        b: 0.0,
+                        r: 0.5,
+                        g: 0.5,
+                        b: 0.5,
                     },
                 },
                 Sphere {
                     origin: Vec3::new(0.0, -100.5, -1.0),
                     radius: 100.0,
                     color: Rgb {
-                        r: 1.0,
-                        g: 0.0,
-                        b: 1.0,
+                        r: 0.5,
+                        g: 0.5,
+                        b: 0.5,
                     },
                 },
             ],
