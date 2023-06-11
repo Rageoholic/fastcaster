@@ -53,6 +53,7 @@ fn visualize_normal(normal: Vec3<f32>) -> Rgb<f32> {
     (normal / 2.0 + 0.5).into()
 }
 
+#[derive(Debug, Copy, Clone)]
 struct HitRecord {
     intersection_point: Vec3<f32>,
     surface_normal: Vec3<f32>,
@@ -87,17 +88,39 @@ fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> Option<HitRecord> {
     }
 }
 
-fn ray_cast(ray: Ray<f32>, world: &World, rng: &mut impl rand::Rng) -> Rgb<f32> {
+fn ray_cast(mut ray: Ray<f32>, world: &World, rng: &mut impl rand::Rng) -> Rgb<f32> {
     let t = 0.5 * (ray.direction.y + 1.0);
     let background_color = Lerp::lerp(Rgb::broadcast(1.0), Rgb::new(0.5, 0.7, 1.0), 1.0 - t);
-    let mut color = background_color;
-    let mut min_distance = f32::INFINITY;
-    for sphere in world.spheres {
-        if let Some(hit_record) = hit_sphere(ray, *sphere) {
-            if hit_record.distance < min_distance {
-                min_distance = hit_record.distance;
-                color = visualize_normal(hit_record.surface_normal);
+    let mut color = Rgb::broadcast(1.0);
+    for _ in 0..4 {
+        let mut min_hit_record: Option<(HitRecord, Rgb<f32>)> = None;
+        for sphere in world.spheres {
+            if let Some(hit_record) = hit_sphere(ray, *sphere) {
+                min_hit_record = min_hit_record
+                    .map(|(mhr, color)| {
+                        if mhr.distance < hit_record.distance {
+                            (mhr, color)
+                        } else {
+                            (hit_record, sphere.color)
+                        }
+                    })
+                    .or(Some((hit_record, sphere.color)));
             }
+        }
+
+        if let Some((hit_record, hit_color)) = min_hit_record {
+            let mut random = Vec3::new(rng.gen::<f32>(), rng.gen::<f32>(), rng.gen::<f32>());
+            if random.magnitude_squared() > 1.0 {
+                random.normalize()
+            }
+            color *= hit_color;
+            ray = Ray::new(
+                hit_record.intersection_point,
+                hit_record.surface_normal + random,
+            );
+        } else {
+            color *= background_color;
+            break;
         }
     }
     color
@@ -184,7 +207,7 @@ fn main() {
                     color: Rgb {
                         r: 1.0,
                         g: 0.0,
-                        b: 0.0,
+                        b: 1.0,
                     },
                 },
             ],
