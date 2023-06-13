@@ -10,8 +10,8 @@ use winit::{
     window::WindowBuilder,
 };
 
-const WIDTH: usize = 1280;
-const HEIGHT: usize = 720;
+const WIDTH: usize = 400;
+const HEIGHT: usize = 300;
 
 #[derive(Debug, Clone, Copy)]
 struct Pixel {
@@ -21,10 +21,22 @@ struct Pixel {
 }
 
 #[derive(Clone, Copy)]
+enum MaterialType {
+    Lambertian,
+    Metal(f32),
+}
+
+#[derive(Clone, Copy)]
+struct Material {
+    color: Rgb<f32>,
+    mat_type: MaterialType,
+}
+
+#[derive(Clone, Copy)]
 struct Sphere {
     origin: vek::Vec3<f32>,
     radius: f32,
-    color: Rgb<f32>,
+    material: Material,
 }
 struct World<'a> {
     spheres: &'a [Sphere],
@@ -42,13 +54,14 @@ impl Pixel {
     /// Create a pixel from an RGB vec in the [0,1] range
     fn from_vek_color(v: Rgb<f32>) -> Self {
         Self {
-            red: (v.r * 255.99) as u8,
-            green: (v.g * 255.99) as u8,
-            blue: (v.b * 255.99) as u8,
+            red: (v.r.clamp(0.0, 1.0) * 255.99) as u8,
+            green: (v.g.clamp(0.0, 1.0) * 255.99) as u8,
+            blue: (v.b.clamp(0.0, 1.0) * 255.99) as u8,
         }
     }
 }
 
+#[allow(dead_code)]
 fn visualize_normal(normal: Vec3<f32>) -> Rgb<f32> {
     (normal / 2.0 + 0.5).into()
 }
@@ -60,6 +73,44 @@ struct HitRecord {
     distance: f32,
 }
 
+const SHADOW_ACNE_FUDGE_CONSTANT: f32 = 0.001;
+
+trait RandVec: Rng {
+    fn rand_vec3(&mut self) -> Vec3<f32> {
+        Vec3::new(
+            self.gen_range(-1.0..1.0),
+            self.gen_range(-1.0..1.0),
+            self.gen_range(-1.0..1.0),
+        )
+    }
+
+    fn rand_vec3_in_unit_sphere(&mut self) -> Vec3<f32> {
+        let mut v;
+        loop {
+            v = self.rand_vec3();
+            if v.magnitude_squared() < 1.0 {
+                break;
+            }
+        }
+        v
+    }
+
+    fn rand_unit_vec3(&mut self) -> Vec3<f32> {
+        self.rand_vec3_in_unit_sphere().normalized()
+    }
+
+    fn rand_in_hemisphere(&mut self, normal: Vec3<f32>) -> Vec3<f32> {
+        let in_unit_sphere = self.rand_vec3_in_unit_sphere();
+        if in_unit_sphere.dot(normal) > 0.0 {
+            in_unit_sphere
+        } else {
+            -in_unit_sphere
+        }
+    }
+}
+
+impl<T: Rng> RandVec for T {}
+
 fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> Option<HitRecord> {
     let oc = ray.origin - sphere.origin;
     let a = ray.direction.dot(ray.direction);
@@ -69,9 +120,9 @@ fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> Option<HitRecord> {
     if discriminant > 0.0 {
         let neg_distance = (-b - discriminant.sqrt()) / (2.0 * a);
         let pos_distance = (-b + discriminant.sqrt()) / (2.0 * a);
-        let distance = if neg_distance > 0.0 {
+        let distance = if neg_distance > SHADOW_ACNE_FUDGE_CONSTANT {
             neg_distance
-        } else if pos_distance > 0.0 {
+        } else if pos_distance > SHADOW_ACNE_FUDGE_CONSTANT {
             pos_distance
         } else {
             return None;
@@ -87,14 +138,18 @@ fn hit_sphere(ray: Ray<f32>, sphere: Sphere) -> Option<HitRecord> {
         None
     }
 }
-const MAX_DEPTH: usize = 50;
+const MAX_DEPTH: usize = 100;
+
+fn reflected(v: Vec3<f32>, n: Vec3<f32>) -> Vec3<f32> {
+    return v - 2.0 * v.dot(n) * n;
+}
 
 fn ray_cast(mut ray: Ray<f32>, world: &World, rng: &mut impl rand::Rng) -> Rgb<f32> {
     let t = 1.0 - 0.5 * (ray.direction.y + 1.0);
     let background_color = Lerp::lerp(Rgb::broadcast(1.0), Rgb::new(0.5, 0.7, 1.0), 1.0 - t);
     let mut color = Rgb::broadcast(1.0);
     for _ in 0..MAX_DEPTH {
-        let mut min_hit_record: Option<(HitRecord, Rgb<f32>)> = None;
+        let mut min_hit_record: Option<(HitRecord, Material)> = None;
         for sphere in world.spheres {
             if let Some(hit_record) = hit_sphere(ray, *sphere) {
                 min_hit_record = min_hit_record
@@ -102,23 +157,34 @@ fn ray_cast(mut ray: Ray<f32>, world: &World, rng: &mut impl rand::Rng) -> Rgb<f
                         if mhr.distance < hit_record.distance {
                             (mhr, color)
                         } else {
-                            (hit_record, sphere.color)
+                            (hit_record, sphere.material)
                         }
                     })
-                    .or(Some((hit_record, sphere.color)));
+                    .or(Some((hit_record, sphere.material)));
             }
         }
 
-        if let Some((hit_record, hit_color)) = min_hit_record {
-            let mut random = Vec3::new(rng.gen::<f32>(), rng.gen::<f32>(), rng.gen::<f32>());
-            if random.magnitude_squared() > 1.0 {
-                random.normalize()
+        if let Some((hit_record, hit_material)) = min_hit_record {
+            color *= hit_material.color;
+            match hit_material.mat_type {
+                MaterialType::Lambertian => {
+                    let random = rng.rand_unit_vec3();
+                    ray = Ray::new(
+                        hit_record.intersection_point,
+                        (hit_record.surface_normal + random).normalized(),
+                    );
+                }
+                MaterialType::Metal(fuzz) => {
+                    let reflected = reflected(ray.direction, hit_record.surface_normal)
+                        + fuzz * rng.rand_vec3_in_unit_sphere();
+                    if reflected.dot(hit_record.surface_normal) > 0.0 {
+                        ray = Ray::new(hit_record.intersection_point, reflected.normalized())
+                    } else {
+                        color *= Rgb::broadcast(0.0);
+                        break;
+                    }
+                }
             }
-            color *= hit_color;
-            ray = Ray::new(
-                hit_record.intersection_point,
-                hit_record.surface_normal + random,
-            );
         } else {
             color *= background_color;
             break;
@@ -163,8 +229,11 @@ fn draw(draw_size: PhysicalSize<u32>, world: &World) -> Vec<u32> {
 
                 pixel_color += ray_cast(ray, world, &mut rng);
             }
-            let corrected_pixel_color = pixel_color.map(|f| f.sqrt());
-            let pixel_bits = Pixel::from_vek_color(pixel_color / sample_count as f32);
+            let pixel_color = pixel_color / sample_count as f32;
+
+            let pixel_color = pixel_color.map(|f| f.sqrt());
+
+            let pixel_bits = Pixel::from_vek_color(pixel_color);
 
             buffer.push(pixel_bits.to_u32())
         }
@@ -197,19 +266,41 @@ fn main() {
                 Sphere {
                     origin: Vec3::new(0.0, 0.0, -1.0),
                     radius: 0.5,
-                    color: Rgb {
-                        r: 0.5,
-                        g: 0.5,
-                        b: 0.5,
+                    material: Material {
+                        color: Rgb {
+                            r: 0.7,
+                            g: 0.3,
+                            b: 0.3,
+                        },
+                        mat_type: MaterialType::Lambertian,
                     },
                 },
                 Sphere {
                     origin: Vec3::new(0.0, -100.5, -1.0),
                     radius: 100.0,
-                    color: Rgb {
-                        r: 0.5,
-                        g: 0.5,
-                        b: 0.5,
+                    material: Material {
+                        color: Rgb::new(0.8, 0.8, 0.3),
+                        mat_type: MaterialType::Lambertian,
+                    },
+                },
+                Sphere {
+                    origin: Vec3::new(-1.0, 0.0, -1.0),
+                    radius: 0.5,
+                    material: Material {
+                        color: Rgb::new(0.8, 0.8, 0.8),
+                        mat_type: MaterialType::Metal(0.3),
+                    },
+                },
+                Sphere {
+                    origin: Vec3 {
+                        x: 1.0,
+                        y: 0.0,
+                        z: -1.0,
+                    },
+                    radius: 0.5,
+                    material: Material {
+                        color: Rgb::new(0.8, 0.6, 0.2),
+                        mat_type: MaterialType::Metal(1.0),
                     },
                 },
             ],
