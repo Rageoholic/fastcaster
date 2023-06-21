@@ -1,6 +1,7 @@
 use std::{sync::mpsc::channel, thread};
 
-use rand::Rng;
+use rand::{rngs::StdRng, Rng, SeedableRng};
+use rayon::prelude::{IntoParallelIterator, ParallelExtend, ParallelIterator};
 use softbuffer::GraphicsContext;
 use vek::{Lerp, Ray, Rgb, Vec3};
 use winit::{
@@ -202,42 +203,43 @@ fn draw(draw_size: PhysicalSize<u32>, world: &World) -> Vec<u32> {
     let viewport_height = 2.0;
     let viewport_width = aspect_ratio * viewport_height;
     let focal_length = 1.0;
-    let mut rng = rand::thread_rng();
 
     let origin = Vec3::broadcast(0.0);
     let horizontal = Vec3::new(viewport_width, 0.0, 0.0);
-    let vertical = Vec3::new(0.0, viewport_height, 0.0);
+    let vertical = Vec3::new(0.0, -viewport_height, 0.0);
 
     let upper_left_corner =
         origin - horizontal / 2.0 - vertical / 2.0 - Vec3::new(0.0, 0.0, focal_length);
     let sample_count = 4;
 
-    let mut buffer = Vec::with_capacity(width * height);
-    for y in (0..height).rev() {
-        for x in 0..width {
-            let mut pixel_color = Rgb::broadcast(0.0);
-            for _ in 0..sample_count {
-                let v = (y as f32 + rng.gen::<f32>()) / (height as f32 - 1.0);
-                let u = (x as f32 + rng.gen::<f32>()) / (width as f32 - 1.0);
+    let mut buffer: Vec<u32> = Vec::with_capacity(width * height);
+    let seed = rand::rngs::OsRng.gen();
 
-                let normalized_direction =
-                    (upper_left_corner + u * horizontal + v * vertical - origin).normalized();
-                if !normalized_direction.is_normalized() {
-                    eprintln!("non normal vector");
-                }
-                let ray = Ray::new(origin, normalized_direction);
+    buffer.par_extend((0..width * height).into_par_iter().map(|i| {
+        let x = i % width;
+        let y = i / width;
+        let mut pixel_color = Rgb::broadcast(0.0);
+        let mut rng = StdRng::seed_from_u64(u64::wrapping_add(seed, i as u64));
+        for _ in 0..sample_count {
+            let v = (y as f32 + rng.gen::<f32>()) / (height as f32 - 1.0);
+            let u = (x as f32 + rng.gen::<f32>()) / (width as f32 - 1.0);
 
-                pixel_color += ray_cast(ray, world, &mut rng);
+            let normalized_direction =
+                (upper_left_corner + u * horizontal + v * vertical - origin).normalized();
+            if !normalized_direction.is_normalized() {
+                eprintln!("non normal vector");
             }
-            let pixel_color = pixel_color / sample_count as f32;
+            let ray = Ray::new(origin, normalized_direction);
 
-            let pixel_color = pixel_color.map(|f| f.sqrt());
-
-            let pixel_bits = Pixel::from_vek_color(pixel_color);
-
-            buffer.push(pixel_bits.to_u32())
+            pixel_color += ray_cast(ray, world, &mut rng);
         }
-    }
+        let pixel_color = pixel_color / sample_count as f32;
+
+        let pixel_color = pixel_color.map(|f| f.sqrt());
+
+        let pixel_bits = Pixel::from_vek_color(pixel_color);
+        pixel_bits.to_u32()
+    }));
 
     buffer
 }
@@ -248,6 +250,8 @@ fn main() {
         .with_inner_size(PhysicalSize::new(WIDTH as f32, HEIGHT as f32))
         .build(&event_loop)
         .unwrap();
+
+    let mut window_size = PhysicalSize::new(WIDTH as u32, HEIGHT as u32);
 
     let mut buffer = vec![0; WIDTH * HEIGHT];
 
@@ -319,16 +323,21 @@ fn main() {
                 *control_flow = ControlFlow::Exit;
             }
             WindowEvent::Resized(new_size) => {
-                buffer = vec![0; (new_size.width * new_size.height) as usize];
-                sender.send(new_size).unwrap();
+                if window_size != new_size {
+                    buffer = vec![0; (new_size.width * new_size.height) as usize];
+                    sender.send(new_size).unwrap();
+                    println!("resized from {:?} to {:?}", window_size, new_size);
+                    window_size = new_size;
+                }
             }
             _ => {}
         },
         Event::UserEvent(ThreadRedrawCompleteEvent(new_buf)) => {
             if buffer.len() == new_buf.len() {
                 buffer = new_buf;
+                window.request_redraw();
+                println!("New display!");
             }
-            window.request_redraw();
         }
         Event::RedrawRequested(_win_id) => {
             let (width, height) = {
